@@ -1,7 +1,7 @@
 """Configuration types shared across both Clients and Services."""
 
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional, Set
+from typing import List, Literal, Optional, Set, Union
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 from typing_extensions import Annotated
@@ -100,6 +100,7 @@ class ControlPlaneConfig:
     Password credentials for broker connection.
     """
 
+    # Configuration for a single broker host
     host: Annotated[str, Field(min_length=1)] = '127.0.0.1'
     """
     Broker hostname (default: 127.0.0.1)
@@ -121,6 +122,19 @@ class ControlPlaneConfig:
     - 61613 (RabbitMQ STOMP - WARNING: ephemeral port)
 
     NOTE: INTERSECT currently only supports AMQP and MQTT.
+    """
+    
+    # Configuration for clustered brokers
+    hosts: Optional[List[str]] = None
+    """
+    List of broker hostnames for clustering support. When specified, this takes precedence
+    over the 'host' field for AMQP connections.
+    """
+
+    ports: Optional[List[PositiveInt]] = None
+    """
+    List of broker ports corresponding to the hosts list for clustering support.
+    Must be the same length as the 'hosts' list.
     """
 
 

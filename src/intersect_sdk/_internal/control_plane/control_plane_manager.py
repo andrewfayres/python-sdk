@@ -31,26 +31,62 @@ def create_control_provider(
     if config.protocol == 'amqp0.9.1':
         # only try to import the AMQP client if the user is using an AMQP broker
         try:
-            from .brokers.amqp_client import AMQPClient
-
-            return AMQPClient(
-                host=config.host,
-                port=config.port or 5672,
-                username=config.username,
-                password=config.password,
-                topics_to_handlers=topic_handler_callback,
-            )
+            from .brokers.amqp_client import AMQPClient, ClusterConnectionParameters
+            
+            # Check if we're using clustering configuration
+            if config.hosts is not None and config.ports is not None and len(config.hosts) > 0:
+                # Create a cluster configuration
+                cluster_params = ClusterConnectionParameters(
+                    hosts=config.hosts,
+                    ports=config.ports,
+                    virtual_host='/',
+                    username=config.username,
+                    password=config.password,
+                )
+                
+                return AMQPClient(
+                    cluster_params=cluster_params,
+                    topics_to_handlers=topic_handler_callback,
+                )
+            else:
+                # Non-clustered configuration (backward compatibility)
+                return AMQPClient(
+                    host=config.host,
+                    port=config.port or 5672,
+                    username=config.username,
+                    password=config.password,
+                    topics_to_handlers=topic_handler_callback,
+                )
+                
         except ImportError as e:
             msg = "Configuration includes AMQP broker, but AMQP dependencies were not installed. Install intersect with the 'amqp' optional dependency to use this backend. (i.e. `pip install intersect_sdk[amqp]`)"
             raise IntersectInvalidBrokerError(msg) from e
     # MQTT
-    return MQTTClient(
-        host=config.host,
-        port=config.port or 1883,
-        username=config.username,
-        password=config.password,
-        topics_to_handlers=topic_handler_callback,
-    )
+    from .brokers.mqtt_client import MQTTClient, ClusterConnectionParameters
+    
+    # Check if we're using clustering configuration
+    if config.hosts is not None and config.ports is not None and len(config.hosts) > 0:
+        # Create a cluster configuration for MQTT
+        cluster_params = ClusterConnectionParameters(
+            hosts=config.hosts,
+            ports=config.ports,
+            username=config.username,
+            password=config.password,
+        )
+        
+        return MQTTClient(
+            cluster_params=cluster_params,
+            topics_to_handlers=topic_handler_callback,
+        )
+    else:
+        # Non-clustered configuration (backward compatibility)
+        return MQTTClient(
+            host=config.host,
+            port=config.port or 1883,
+            username=config.username,
+            password=config.password,
+            topics_to_handlers=topic_handler_callback,
+        )
 
 
 class ControlPlaneManager:
@@ -151,20 +187,42 @@ class ControlPlaneManager:
 
     def publish_message(self, channel: str, msg: Any, persist: bool) -> None:
         """Publish message on channel for all brokers."""
-        if self.is_connected():
-            serialized_message = serialize_message(msg)
-            for provider in self._control_providers:
+        serialized_message = serialize_message(msg)
+        
+        # Check if we're connected, if not try to reconnect
+        if not self.is_connected():
+            logger.warning('Not connected to brokers, attempting reconnection before publishing')
+            self.connect()
+            
+        # Try to publish even if we're not fully connected - individual providers
+        # will handle reconnection as needed
+        sent_successfully = False
+        for provider in self._control_providers:
+            try:
+                # The providers will handle their own connection status and try to reconnect
+                # if needed before publishing
                 provider.publish(channel, serialized_message, persist)
-        else:
-            logger.error('Cannot send message, providers are not connected')
+                if provider.is_connected():
+                    sent_successfully = True
+            except Exception as e:
+                logger.error(f'Error publishing message through provider: {e}')
+                
+        if not sent_successfully:
+            logger.error('Failed to publish message through any provider')
 
     def is_connected(self) -> bool:
-        """Check that we are connected to ALL configured brokers.
+        """Check that we are connected to at least one broker.
 
         Returns:
-          - True if we are currently connected to all brokers we've configured, False if not
+          - True if we are currently connected to at least one broker, False if not
         """
-        return self._ready and all(
+        # If we have no control providers, we're not connected
+        if not self._control_providers:
+            return False
+            
+        # We consider ourselves connected if at least one provider is connected
+        # This allows for more graceful failover in clustered environments
+        return self._ready and any(
             control_provider.is_connected() for control_provider in self._control_providers
         )
 
